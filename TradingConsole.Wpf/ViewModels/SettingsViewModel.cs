@@ -5,6 +5,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
 using TradingConsole.Core.Models;
@@ -16,6 +17,8 @@ namespace TradingConsole.Wpf.ViewModels
     {
         private readonly SettingsService _settingsService;
         private AppSettings _settings;
+        // --- ADDED: Reference to MainViewModel to invoke Kill Switch logic ---
+        private readonly MainViewModel _mainViewModel;
 
         public ReadOnlyCollection<string> MonitoredSymbols => new ReadOnlyCollection<string>(_settings.MonitoredSymbols);
 
@@ -96,6 +99,18 @@ namespace TradingConsole.Wpf.ViewModels
         public decimal SensexThreshold { get => _sensexThreshold; set { _sensexThreshold = value; OnPropertyChanged(); } }
         #endregion
 
+        #region Kill Switch Settings
+        private bool _isAutoKillSwitchEnabled;
+        public bool IsAutoKillSwitchEnabled { get => _isAutoKillSwitchEnabled; set { if (_isAutoKillSwitchEnabled != value) { _isAutoKillSwitchEnabled = value; OnPropertyChanged(); } } }
+
+        private decimal _maxDailyLossLimit;
+        public decimal MaxDailyLossLimit { get => _maxDailyLossLimit; set { if (_maxDailyLossLimit != value) { _maxDailyLossLimit = value; OnPropertyChanged(); } } }
+
+        // --- ADDED: Property to reflect global Kill Switch state from MainViewModel ---
+        public bool IsKillSwitchActive => _mainViewModel.IsKillSwitchActive;
+        #endregion
+
+
         public ObservableCollection<DateTime> MarketHolidays { get; set; }
 
         private DateTime? _newHoliday;
@@ -108,14 +123,25 @@ namespace TradingConsole.Wpf.ViewModels
         public ICommand AddHolidayCommand { get; }
         public ICommand RemoveHolidayCommand { get; }
         public ICommand SaveSettingsCommand { get; }
+        // --- ADDED: Command for the Kill Switch button ---
+        public ICommand ActivateKillSwitchCommand { get; }
         public event EventHandler? SettingsSaved;
 
-        public SettingsViewModel(SettingsService settingsService)
+        // --- MODIFIED: Constructor now accepts MainViewModel ---
+        public SettingsViewModel(SettingsService settingsService, MainViewModel mainViewModel)
         {
             _settingsService = settingsService;
+            _mainViewModel = mainViewModel;
             _settings = _settingsService.LoadSettings();
 
-            // --- THE FIX: Initialize the collection here to prevent null reference errors. ---
+            // --- ADDED: Listen for changes on the MainViewModel's Kill Switch property ---
+            _mainViewModel.PropertyChanged += (s, e) => {
+                if (e.PropertyName == nameof(MainViewModel.IsKillSwitchActive))
+                {
+                    OnPropertyChanged(nameof(IsKillSwitchActive));
+                }
+            };
+
             MarketHolidays = new ObservableCollection<DateTime>();
 
             LoadSettingsIntoViewModel();
@@ -123,6 +149,8 @@ namespace TradingConsole.Wpf.ViewModels
             SaveSettingsCommand = new RelayCommand(ExecuteSaveSettings);
             AddHolidayCommand = new RelayCommand(ExecuteAddHoliday, CanExecuteAddHoliday);
             RemoveHolidayCommand = new RelayCommand(ExecuteRemoveHoliday);
+            // --- ADDED: Initialize the Kill Switch command ---
+            ActivateKillSwitchCommand = new RelayCommand(async _ => await _mainViewModel.EngageKillSwitchAsync(), _ => !IsKillSwitchActive);
         }
 
         private void LoadSettingsIntoViewModel()
@@ -166,6 +194,9 @@ namespace TradingConsole.Wpf.ViewModels
             SensexSupport = sensexLevels.SupportLevel;
             SensexResistance = sensexLevels.ResistanceLevel;
             SensexThreshold = sensexLevels.Threshold;
+
+            IsAutoKillSwitchEnabled = _settings.IsAutoKillSwitchEnabled;
+            MaxDailyLossLimit = _settings.MaxDailyLossLimit;
 
             MarketHolidays.Clear();
             var loadedHolidays = _settings.MarketHolidays ?? new List<DateTime>();
@@ -223,6 +254,9 @@ namespace TradingConsole.Wpf.ViewModels
                 Threshold = SensexThreshold
             };
             _settings.MarketHolidays = MarketHolidays.ToList();
+
+            _settings.IsAutoKillSwitchEnabled = IsAutoKillSwitchEnabled;
+            _settings.MaxDailyLossLimit = MaxDailyLossLimit;
 
             _settingsService.SaveSettings(_settings);
             MessageBox.Show("Settings saved successfully!", "Success", MessageBoxButton.OK, MessageBoxImage.Information);

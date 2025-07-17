@@ -40,8 +40,9 @@ namespace TradingConsole.Wpf.ViewModels
         private readonly string _exchangeSegment;
         private readonly bool _isModification = false;
         private readonly string? _orderId;
-        // NEW: The freeze limit is now a dynamic value passed into the view model.
         private readonly int _freezeLimit;
+        // --- ADDED: Field to store the Kill Switch state ---
+        private readonly bool _isKillSwitchActive;
         #endregion
 
         #region Public Properties
@@ -147,8 +148,8 @@ namespace TradingConsole.Wpf.ViewModels
         #endregion
 
         #region Constructors
-        // MODIFIED: Constructor now accepts the freeze limit for the specific instrument.
-        public OrderEntryViewModel(string securityId, string instrumentName, string exchangeSegment, bool isBuy, decimal initialPrice, decimal previousClose, int lotSize, string productType, DhanApiClient apiClient, DhanWebSocketClient webSocketClient, string dhanClientId, ScripMasterService scripMasterService, int freezeLimit, OrderBookEntry? existingOrder = null)
+        // --- MODIFIED: Constructor now accepts the killSwitchState ---
+        public OrderEntryViewModel(string securityId, string instrumentName, string exchangeSegment, bool isBuy, decimal initialPrice, decimal previousClose, int lotSize, string productType, DhanApiClient apiClient, DhanWebSocketClient webSocketClient, string dhanClientId, ScripMasterService scripMasterService, int freezeLimit, bool isKillSwitchActive, OrderBookEntry? existingOrder = null)
         {
             _apiClient = apiClient;
             _webSocketClient = webSocketClient;
@@ -163,7 +164,8 @@ namespace TradingConsole.Wpf.ViewModels
             TriggerPrice = initialPrice;
             _lotSize = lotSize;
             SelectedProductType = productType;
-            _freezeLimit = freezeLimit; // Store the freeze limit
+            _freezeLimit = freezeLimit;
+            _isKillSwitchActive = isKillSwitchActive; // --- ADDED: Store the state ---
 
             LiveLtp = initialPrice;
             PreviousClose = previousClose;
@@ -185,7 +187,16 @@ namespace TradingConsole.Wpf.ViewModels
         #endregion
 
         #region Command Execution
-        private bool CanPlaceOrder() => !string.IsNullOrEmpty(_securityId) && _lotSize > 0;
+        private bool CanPlaceOrder()
+        {
+            // --- MODIFIED: Check the kill switch state first ---
+            if (_isKillSwitchActive)
+            {
+                StatusMessage = "Kill Switch is active. Trading is disabled.";
+                return false;
+            }
+            return !string.IsNullOrEmpty(_securityId) && _lotSize > 0;
+        }
 
         private async Task ExecutePlaceOrModifyOrder()
         {
@@ -198,7 +209,6 @@ namespace TradingConsole.Wpf.ViewModels
                     return;
                 }
 
-                // MODIFIED: Use the dynamic _freezeLimit field instead of a hardcoded value.
                 if (IsBracketOrderVisible && TotalQuantity > _freezeLimit)
                 {
                     await ExecuteChunkedSuperOrder();
@@ -236,7 +246,6 @@ namespace TradingConsole.Wpf.ViewModels
         {
             int remainingQuantity = TotalQuantity;
             int chunkNumber = 1;
-            // MODIFIED: Use the dynamic _freezeLimit field for calculation.
             int totalChunks = (int)Math.Ceiling((double)TotalQuantity / _freezeLimit);
 
             while (remainingQuantity > 0)

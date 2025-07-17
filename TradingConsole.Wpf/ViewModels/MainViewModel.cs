@@ -44,7 +44,6 @@ namespace TradingConsole.Wpf.ViewModels
         private readonly HistoricalIvService _historicalIvService;
         private readonly MarketProfileService _marketProfileService;
         private readonly IndicatorStateService _indicatorStateService;
-        // --- ADDED: Service for logging signals ---
         private readonly SignalLoggerService _signalLoggerService;
         private readonly string _dhanClientId;
         private Timer? _optionChainRefreshTimer;
@@ -59,6 +58,21 @@ namespace TradingConsole.Wpf.ViewModels
 
         private Dictionary<string, DashboardInstrument> _dashboardInstrumentMap = new();
         private Dictionary<string, Position> _openPositionsMap = new();
+
+        private bool _isKillSwitchActive;
+        public bool IsKillSwitchActive
+        {
+            get => _isKillSwitchActive;
+            set
+            {
+                if (_isKillSwitchActive != value)
+                {
+                    _isKillSwitchActive = value;
+                    OnPropertyChanged();
+                    CommandManager.InvalidateRequerySuggested();
+                }
+            }
+        }
         #endregion
 
         #region Public Properties
@@ -162,19 +176,20 @@ namespace TradingConsole.Wpf.ViewModels
             _historicalIvService = new HistoricalIvService();
             _marketProfileService = new MarketProfileService();
             _indicatorStateService = new IndicatorStateService();
-            // --- ADDED: Instantiate the new logging service ---
             _signalLoggerService = new SignalLoggerService();
 
             var settingsService = new SettingsService();
-            Settings = new SettingsViewModel(settingsService);
+            // --- MODIFIED: Pass 'this' MainViewModel instance to the SettingsViewModel ---
+            Settings = new SettingsViewModel(settingsService, this);
             Settings.SettingsSaved += Settings_SettingsSaved;
 
-            // --- MODIFIED: Pass all services to the AnalysisService constructor ---
             _analysisService = new AnalysisService(Settings, _apiClient, _scripMasterService, _historicalIvService, _marketProfileService, _indicatorStateService, _signalLoggerService);
             _analysisService.OnAnalysisUpdated += OnAnalysisResultUpdated;
 
             Dashboard = new DashboardViewModel();
             Portfolio = new PortfolioViewModel();
+            Portfolio.PropertyChanged += Portfolio_PropertyChanged;
+
             AnalysisTab = new AnalysisTabViewModel();
             TradeSignalTab = new TradeSignalViewModel();
 
@@ -194,17 +209,17 @@ namespace TradingConsole.Wpf.ViewModels
             Orders = new ObservableCollection<OrderBookEntry>();
             Indices = new ObservableCollection<TickerIndex>();
 
-            BuyCallCommand = new RelayCommand(ExecuteBuyCall);
-            SellCallCommand = new RelayCommand(ExecuteSellCall);
-            BuyPutCommand = new RelayCommand(ExecuteBuyPut);
-            SellPutCommand = new RelayCommand(ExecuteSellPut);
+            BuyCallCommand = new RelayCommand(ExecuteBuyCall, (p) => !IsKillSwitchActive);
+            SellCallCommand = new RelayCommand(ExecuteSellCall, (p) => !IsKillSwitchActive);
+            BuyPutCommand = new RelayCommand(ExecuteBuyPut, (p) => !IsKillSwitchActive);
+            SellPutCommand = new RelayCommand(ExecuteSellPut, (p) => !IsKillSwitchActive);
             RefreshOrdersCommand = new RelayCommand(async (p) => await LoadOrdersAsync());
             RefreshPortfolioCommand = new RelayCommand(async (p) => await LoadPortfolioAsync());
-            AddPositionCommand = new RelayCommand(ExecuteAddPosition);
-            ExitPositionCommand = new RelayCommand(ExecuteExitPosition);
-            CloseSelectedPositionsCommand = new RelayCommand(async (p) => await ExecuteCloseSelectedPositionsAsync());
-            ConvertPositionCommand = new RelayCommand(async (p) => await ExecuteConvertPositionAsync(p));
-            ModifyOrderCommand = new RelayCommand(ExecuteModifyOrder);
+            AddPositionCommand = new RelayCommand(ExecuteAddPosition, (p) => !IsKillSwitchActive);
+            ExitPositionCommand = new RelayCommand(ExecuteExitPosition, (p) => !IsKillSwitchActive);
+            CloseSelectedPositionsCommand = new RelayCommand(async (p) => await ExecuteCloseSelectedPositionsAsync(), (p) => !IsKillSwitchActive);
+            ConvertPositionCommand = new RelayCommand(async (p) => await ExecuteConvertPositionAsync(p), (p) => !IsKillSwitchActive);
+            ModifyOrderCommand = new RelayCommand(ExecuteModifyOrder, (p) => !IsKillSwitchActive);
             CancelOrderCommand = new RelayCommand(async (p) => await ExecuteCancelOrderAsync(p));
             AddInstrumentCommand = new RelayCommand(async _ => await ExecuteAddInstrumentAsync(), _ => !string.IsNullOrWhiteSpace(NewInstrumentSymbol));
             RemoveInstrumentCommand = new RelayCommand(async p => await ExecuteRemoveInstrumentAsync(p));
@@ -230,7 +245,108 @@ namespace TradingConsole.Wpf.ViewModels
             });
         }
 
+        private void Portfolio_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+        {
+            if (e.PropertyName == nameof(Portfolio.NetPnl))
+            {
+                CheckAutoKillSwitch();
+            }
+        }
+
         #region Command Methods
+
+        // --- REFACTORED: This is now the single point of entry for the Kill Switch logic ---
+        public async Task EngageKillSwitchAsync()
+        {
+            if (IsKillSwitchActive) return;
+
+            var warningMessage = "WARNING: This will attempt to square off all open positions, cancel all pending orders, and then disable all trading functions for the rest of the day.\n\nAre you absolutely sure you want to proceed?";
+
+            if (MessageBox.Show(warningMessage, "Confirm Kill Switch Activation", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.No)
+            {
+                return;
+            }
+
+            await UpdateStatusAsync("ENGAGING KILL SWITCH...");
+
+            try
+            {
+                // Step 1: Cancel all pending orders
+                await UpdateStatusAsync("Cancelling all pending orders...");
+                var pendingOrders = Orders.Where(o => o.IsPending).ToList();
+                foreach (var order in pendingOrders)
+                {
+                    await _apiClient.CancelOrderAsync(order.OrderId);
+                    await Task.Delay(200); // Small delay between API calls
+                }
+                await UpdateStatusAsync("All pending orders cancelled.");
+
+                // Step 2: Square off all open positions
+                await UpdateStatusAsync("Squaring off all open positions...");
+                var openPositions = Portfolio.OpenPositions.ToList(); // Work on a copy
+                foreach (var pos in openPositions)
+                {
+                    var orderRequest = new OrderRequest
+                    {
+                        DhanClientId = _dhanClientId,
+                        TransactionType = pos.Quantity > 0 ? TransactionTypeSell : TransactionTypeBuy,
+                        ExchangeSegment = "NSE_FNO", // Assuming FNO, might need logic to determine segment
+                        ProductType = pos.ProductType,
+                        OrderType = OrderTypeMarket,
+                        SecurityId = pos.SecurityId,
+                        Quantity = Math.Abs(pos.Quantity),
+                        Validity = ValidityDay
+                    };
+                    await _apiClient.PlaceOrderAsync(orderRequest);
+                    await Task.Delay(200);
+                }
+                await UpdateStatusAsync("All positions squared off.");
+
+                // Step 3: Activate the official Dhan Kill Switch
+                await UpdateStatusAsync("Activating final broker-level Kill Switch...");
+                var success = await _apiClient.ActivateKillSwitchAsync();
+
+                if (success)
+                {
+                    IsKillSwitchActive = true;
+                    await UpdateStatusAsync("KILL SWITCH ACTIVATED. Trading disabled for the day.");
+                    MessageBox.Show("Kill Switch has been successfully activated. All trading is now blocked.", "Kill Switch Active", MessageBoxButton.OK, MessageBoxImage.Information);
+
+                    await Task.Delay(2000); // Wait for broker state to update
+                    await LoadPortfolioAsync();
+                    await LoadOrdersAsync();
+                }
+                else
+                {
+                    await UpdateStatusAsync("Failed to activate broker Kill Switch. Trading disabled locally.");
+                    MessageBox.Show("Could not confirm Kill Switch activation with the broker, but trading has been disabled within this application to be safe.", "Kill Switch Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    IsKillSwitchActive = true;
+                }
+            }
+            catch (DhanApiException ex)
+            {
+                await UpdateStatusAsync($"Kill Switch API Error: {ex.Message}. Trading disabled locally.");
+                MessageBox.Show($"An API error occurred during the Kill Switch sequence: {ex.Message}\n\nFor safety, all trading functions in this app have been disabled.", "Kill Switch API Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                IsKillSwitchActive = true;
+            }
+        }
+
+        private void CheckAutoKillSwitch()
+        {
+            if (IsKillSwitchActive || !Settings.IsAutoKillSwitchEnabled || Settings.MaxDailyLossLimit <= 0)
+            {
+                return;
+            }
+
+            decimal lossLimit = -Math.Abs(Settings.MaxDailyLossLimit);
+
+            if (Portfolio.NetPnl <= lossLimit)
+            {
+                MessageBox.Show($"Automatic Kill Switch triggered! Your Net P&L of {Portfolio.NetPnl:C} has breached the maximum daily loss limit of {lossLimit:C}.", "Automatic Kill Switch", MessageBoxButton.OK, MessageBoxImage.Warning);
+                _ = EngageKillSwitchAsync();
+            }
+        }
+
 
         private async Task ExecuteAddInstrumentAsync()
         {
@@ -393,6 +509,7 @@ namespace TradingConsole.Wpf.ViewModels
                 _dhanClientId,
                 _scripMasterService,
                 freezeLimit,
+                IsKillSwitchActive,
                 existingOrder: order
             );
 
@@ -449,7 +566,8 @@ namespace TradingConsole.Wpf.ViewModels
                 _webSocketClient,
                 _dhanClientId,
                 _scripMasterService,
-                freezeLimit
+                freezeLimit,
+                IsKillSwitchActive
             );
 
             var orderWindow = new OrderEntryWindow { DataContext = orderViewModel, Owner = Application.Current.MainWindow };
@@ -477,7 +595,8 @@ namespace TradingConsole.Wpf.ViewModels
                 _webSocketClient,
                 _dhanClientId,
                 _scripMasterService,
-                freezeLimit
+                freezeLimit,
+                IsKillSwitchActive
             );
 
             var orderWindow = new OrderEntryWindow { DataContext = orderViewModel, Owner = Application.Current.MainWindow };
@@ -1503,6 +1622,8 @@ namespace TradingConsole.Wpf.ViewModels
             _ivCacheSemaphore?.Dispose();
 
             Settings.SettingsSaved -= Settings_SettingsSaved;
+            if (Portfolio != null) Portfolio.PropertyChanged -= Portfolio_PropertyChanged;
+
             _historicalIvService?.SaveDatabase();
             _analysisService?.SaveMarketProfileDatabase();
             _analysisService?.SaveIndicatorStates();

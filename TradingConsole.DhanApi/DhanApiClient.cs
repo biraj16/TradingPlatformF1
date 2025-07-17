@@ -141,6 +141,36 @@ namespace TradingConsole.DhanApi
             }
         }
 
+        // --- ADDED: Method to activate the Kill Switch via Dhan's API ---
+        public async Task<bool> ActivateKillSwitchAsync()
+        {
+            await _generalApiSemaphore.WaitAsync();
+            try
+            {
+                Debug.WriteLine("[DhanApiClient] Sending Kill Switch activation request...");
+                var response = await _httpClient.DeleteAsync("/v2/killswitch");
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var errorBody = await response.Content.ReadAsStringAsync();
+                    Debug.WriteLine($"[DhanApiClient] Kill Switch API Error: {response.StatusCode} - {errorBody}");
+                    throw new DhanApiException($"Failed to activate Kill Switch. API returned {response.StatusCode}: {errorBody}");
+                }
+
+                Debug.WriteLine("[DhanApiClient] Kill Switch activated successfully via API.");
+                return response.IsSuccessStatusCode;
+            }
+            catch (HttpRequestException ex)
+            {
+                Debug.WriteLine($"[DhanApiClient] Kill Switch Network Error: {ex.Message}");
+                throw new DhanApiException("Network error while activating Kill Switch.", ex);
+            }
+            finally
+            {
+                _generalApiSemaphore.Release();
+            }
+        }
+
         public async Task<HistoricalDataPoints?> GetIntradayHistoricalDataAsync(ScripInfo scripInfo, string interval = "1", DateTime? customDate = null)
         {
             DateTime dateToRequest = customDate ?? DateTime.Now;

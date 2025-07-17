@@ -1,4 +1,5 @@
 ﻿// In TradingConsole.Core/Models/AppSettings.cs
+using System;
 using System.Collections.Generic;
 
 namespace TradingConsole.Core.Models
@@ -35,11 +36,15 @@ namespace TradingConsole.Core.Models
         public int IvHistoryLength { get; set; }
         public decimal IvSpikeThreshold { get; set; }
 
-        // --- NEW: Setting for OBV Moving Average ---
         public int ObvMovingAveragePeriod { get; set; }
 
         public Dictionary<string, IndexLevels> CustomIndexLevels { get; set; }
         public List<DateTime> MarketHolidays { get; set; }
+
+        // --- ADDED: Properties for Kill Switch settings ---
+        public bool IsAutoKillSwitchEnabled { get; set; }
+        public decimal MaxDailyLossLimit { get; set; }
+
 
         public AppSettings()
         {
@@ -84,9 +89,12 @@ namespace TradingConsole.Core.Models
             IvHistoryLength = 15;
             IvSpikeThreshold = 0.01m;
 
-            // --- NEW: Initialize OBV MA Period ---
             ObvMovingAveragePeriod = 20;
             MarketHolidays = new List<DateTime>();
+
+            // --- ADDED: Default values for Kill Switch ---
+            IsAutoKillSwitchEnabled = false;
+            MaxDailyLossLimit = 5000;
 
             CustomIndexLevels = new Dictionary<string, IndexLevels>
             {
